@@ -11,7 +11,8 @@ timeseries_for_species(
   years = NULL,
   by = c("class", "group"),
   src = NULL,
-  verbose = TRUE
+  verbose = TRUE,
+  max_pixels = 8e+06
 )
 }
 \arguments{
@@ -22,6 +23,13 @@ timeseries_for_species(
 \item{range}{\code{"eoo"} (default) or \code{"aoo"}.}
 
 \item{years, by, src, verbose}{Passed to \code{\link{cover_timeseries}}.}
+
+\item{max_pixels}{Pixel budget per year, passed to
+\code{\link{cover_timeseries}}. Defaults to \code{8e6} (~8 million) - much
+lower than the single-snapshot assessment, because a composition
+\emph{trend} is a ratio and needs far less resolution, and every year is a
+separate read: the coarser budget makes a multi-year series over a large
+range several times faster with no meaningful change to the percentages.}
 }
 \value{
 The long data frame from \code{\link{cover_timeseries}}, with

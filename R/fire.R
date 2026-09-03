@@ -171,8 +171,18 @@ fire_timeseries <- function(geom, years = NULL, fire_collection = 4,
                             verbose = TRUE) {
   if (!requireNamespace("terra", quietly = TRUE))
     stop("Package 'terra' is required.", call. = FALSE)
+  # Planar (GEOS) geometry, as in assess_species(): the S2 engine rejects a
+  # densified, wide-ranging hull ("Edge is degenerate") during the reads.
+  if (requireNamespace("sf", quietly = TRUE)) {
+    .old_s2 <- suppressMessages(sf::sf_use_s2())
+    on.exit(suppressMessages(sf::sf_use_s2(.old_s2)), add = TRUE)
+    suppressMessages(sf::sf_use_s2(FALSE))
+  }
   years <- years %||% mb_years()
   rows <- lapply(years, function(y) {
+    # Free each year's raster memory on exit so the peak stays at one year
+    # (avoids the OS killing the R process on memory-limited machines).
+    on.exit(invisible(gc(FALSE)), add = TRUE)
     if (verbose) message("  fire ", y)
     r <- tryCatch(
       fire_raster_local(geom, y, "annual", fire_collection, host_collection),

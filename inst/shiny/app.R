@@ -10,6 +10,14 @@ suppressMessages({
   if (requireNamespace("mappingAS", quietly = TRUE)) library(mappingAS)
 })
 
+# Allow large occurrence uploads. Shiny caps a request body at 5 MB by default,
+# so a big occurrence table is rejected in the browser ("Maximum upload size
+# exceeded") before read_occurrences() ever runs. Raise the cap to a generous
+# default; run_app(max_upload_mb=) sets the option before this file is sourced,
+# so an explicit caller choice (even a smaller one) is respected here.
+if (is.null(getOption("shiny.maxRequestSize")))
+  options(shiny.maxRequestSize = 500 * 1024^2)  # 500 MB
+
 `%||%` <- function(a, b) if (is.null(a) || length(a) == 0 || identical(a, "")) b else a
 
 # Row-bind two point sf objects that may carry different attribute columns:
@@ -318,6 +326,31 @@ ui <- bslib::page_sidebar(
       "Results", icon = icon("table"),
       selectInput("results_species", "Species", choices = NULL),
       uiOutput("results_cards"),
+      bslib::card(
+        class = "mb-3",
+        bslib::card_header("IUCN Criterion B — applied category"),
+        bslib::card_body(
+          helpText(htmltools::HTML(
+            "The size thresholds alone are only a screening flag. A threatened ",
+            "listing (CR/EN/VU) also needs <b>at least two</b> sub-criteria. ",
+            "Sub-criterion <b>(a)</b> (few locations) is derived from the data; ",
+            "<b>(b)</b> continuing decline and <b>(c)</b> extreme fluctuation ",
+            "cannot be read from occurrence points, so set them here for the ",
+            "selected species. A range that meets a size threshold but not two ",
+            "sub-criteria is <b>NT</b>. DD/NE are left to your judgement.")),
+          fluidRow(
+            column(4, checkboxInput(
+              "cb_decline",
+              "(b) Continuing decline (EOO/AOO/habitat/locations/individuals)",
+              FALSE)),
+            column(4, checkboxInput(
+              "cb_fluct", "(c) Extreme fluctuations", FALSE)),
+            column(4, checkboxInput(
+              "cb_frag", "Severely fragmented (feeds sub-criterion a)", FALSE))
+          ),
+          uiOutput("results_appliedB")
+        )
+      ),
       bslib::accordion(
         open = FALSE,
         bslib::accordion_panel(
@@ -662,6 +695,86 @@ server <- function(input, output, session) {
     data.frame(species = character(0), lon = numeric(0), lat = numeric(0),
                stringsAsFactors = FALSE))
 
+  # Per-species Criterion B sub-criteria set by the user (b = continuing
+  # decline, c = extreme fluctuation, frag = severely fragmented). Kept in a
+  # named list so switching species remembers each one's inputs. Used to
+  # re-apply iucn_criterion_B() live, without re-running the assessment.
+  subcrit_store <- reactiveVal(list())
+
+  .get_subcrit <- function(sp) {
+    v <- subcrit_store()[[sp]]
+    if (is.null(v)) list(b = FALSE, c = FALSE, frag = FALSE) else v
+  }
+
+  # result()$summary with category_B / criterion_B_code re-applied from the
+  # user's per-species sub-criteria inputs (falling back to the stored defaults).
+  summary_applied <- reactive({
+    req(result())
+    s <- result()$summary
+    if (is.null(s) || !nrow(s) || !"eoo_km2" %in% names(s)) return(s)
+    store <- subcrit_store()
+    for (i in seq_len(nrow(s))) {
+      v <- store[[s$species[i]]]
+      if (is.null(v)) next
+      cb <- mappingAS::iucn_criterion_B(
+        eoo_km2 = s$eoo_km2[i], aoo_km2 = s$aoo_km2[i],
+        n_locations = if ("n_locations" %in% names(s)) s$n_locations[i] else NA,
+        severe_fragmentation = isTRUE(v$frag),
+        decline = isTRUE(v$b), extreme_fluctuation = isTRUE(v$c))
+      s$category_B[i]       <- cb$category
+      s$criterion_B_code[i] <- cb$code
+      if ("subcrit_a" %in% names(s)) s$subcrit_a[i] <- cb$a
+      if ("subcrit_b" %in% names(s)) s$subcrit_b[i] <- cb$b
+      if ("subcrit_c" %in% names(s)) s$subcrit_c[i] <- cb$c
+    }
+    s
+  })
+
+  # Sync the three checkboxes to the selected species' stored values.
+  observeEvent(input$results_species, {
+    v <- .get_subcrit(input$results_species)
+    updateCheckboxInput(session, "cb_decline", value = isTRUE(v$b))
+    updateCheckboxInput(session, "cb_fluct",   value = isTRUE(v$c))
+    updateCheckboxInput(session, "cb_frag",    value = isTRUE(v$frag))
+  }, ignoreInit = TRUE)
+
+  # Persist checkbox edits back into the per-species store.
+  observeEvent(list(input$cb_decline, input$cb_fluct, input$cb_frag), {
+    sp <- input$results_species
+    if (is.null(sp) || !nzchar(sp)) return()
+    st <- subcrit_store()
+    st[[sp]] <- list(b = isTRUE(input$cb_decline),
+                     c = isTRUE(input$cb_fluct),
+                     frag = isTRUE(input$cb_frag))
+    subcrit_store(st)
+  }, ignoreInit = TRUE)
+
+  # Applied Criterion B category for the selected species (live).
+  output$results_appliedB <- renderUI({
+    req(result(), input$results_species)
+    s <- summary_applied()
+    r <- s[s$species == input$results_species, , drop = FALSE]
+    validate(need(nrow(r) > 0, "Select a species."))
+    r <- r[1, , drop = FALSE]
+    cat_final <- if ("category_B" %in% names(r)) r$category_B else NA
+    code <- if ("criterion_B_code" %in% names(r)) r$criterion_B_code else ""
+    b <- mappingAS:::.iucn_badge(cat_final)
+    badge <- sprintf(
+      "<span style='display:inline-flex;align-items:center;justify-content:center;min-width:40px;height:40px;padding:0 10px;border-radius:20px;background:%s;color:%s;font-weight:700;font-size:1rem;border:2px solid rgba(0,0,0,.15)'>%s</span>",
+      b$bg, b$fg, if (is.na(cat_final)) "NA" else cat_final)
+    sub <- function(ok, lab) sprintf(
+      "<span style='margin-right:12px'>%s %s</span>",
+      if (isTRUE(ok)) "✅" else "⬜", lab)
+    htmltools::HTML(sprintf(
+      "<div style='display:flex;align-items:center;gap:12px;flex-wrap:wrap'>%s
+       <div><div style='font-family:monospace;font-weight:700;font-size:1.05rem'>%s</div>
+       <div style='font-size:.82rem;color:#5a655c;margin-top:2px'>%s%s%s</div></div></div>",
+      badge, if (is.na(code) || !nzchar(code)) "&mdash;" else code,
+      sub(r$subcrit_a, "(a) few locations / fragmented"),
+      sub(r$subcrit_b, "(b) continuing decline"),
+      sub(r$subcrit_c, "(c) extreme fluctuation")))
+  })
+
   # Occurrences read from the uploaded file (NULL when no file is uploaded, so
   # the app can run from hand-added points alone). Read errors propagate to the
   # tryCatch around result().
@@ -888,8 +1001,8 @@ server <- function(input, output, session) {
 
   output$tbl <- DT::renderDT({
     req(result())
-    .mas_dt(result()$summary, page = 25,
-            caption = "EOO, AOO and conversion by species")
+    .mas_dt(summary_applied(), page = 25,
+            caption = "EOO, AOO, conversion and applied Criterion B by species")
   })
 
   # Visual overview cards (with in-cell bars) for the selected species.
@@ -979,6 +1092,11 @@ server <- function(input, output, session) {
       c("eoo_cat_B1", L("Provisional category by EOO size (sub-criterion B1).", "Categoria provisoria pelo tamanho da EOO (subcriterio B1).")),
       c("aoo_cat_B2", L("Provisional category by AOO size (sub-criterion B2).", "Categoria provisoria pelo tamanho da AOO (subcriterio B2).")),
       c("provisional_cat", L("Combined provisional category (the more threatened of B1/B2). Screening only.", "Categoria provisoria combinada (a mais ameacada entre B1/B2). Apenas triagem.")),
+      c("category_B", L("Applied Criterion B category (CR/EN/VU need size AND >=2 sub-criteria; NT if size met but not; LC otherwise). DD/NE are never automatic.", "Categoria aplicada do Criterio B (CR/EN/VU exigem tamanho E >=2 subcriterios; NT se so o tamanho; senao LC). DD/NE nunca automaticos.")),
+      c("criterion_B_code", L("Full Criterion B code, e.g. 'VU B1ab'.", "Codigo completo do Criterio B, ex.: 'VU B1ab'.")),
+      c("subcrit_a", L("Sub-criterion (a): severely fragmented or few locations.", "Subcriterio (a): severamente fragmentada ou poucas localidades.")),
+      c("subcrit_b", L("Sub-criterion (b): continuing decline (expert input).", "Subcriterio (b): declinio continuo (entrada do especialista).")),
+      c("subcrit_c", L("Sub-criterion (c): extreme fluctuations (expert input).", "Subcriterio (c): flutuacoes extremas (entrada do especialista).")),
       c("mapbiomas_initiative", L("Land-cover product used (a MapBiomas country, or 'sentinel2' for the global Esri/Sentinel-2 layer).", "Produto de cobertura usado (um pais do MapBiomas, ou 'sentinel2' para a camada global Esri/Sentinel-2).")),
       c("mapbiomas_year", L("Land-cover year used.", "Ano da cobertura usada.")),
       c("mapbiomas_collection", L("Land-cover collection number (NA for Sentinel-2).", "Numero da colecao de cobertura (NA para Sentinel-2).")),
@@ -1241,7 +1359,7 @@ server <- function(input, output, session) {
     filename = function() paste0("mappingAS_results_", Sys.Date(), ".csv"),
     content = .safe_download(function(file) {
       req(result())
-      utils::write.csv(result()$summary, file, row.names = FALSE, fileEncoding = "UTF-8")
+      utils::write.csv(summary_applied(), file, row.names = FALSE, fileEncoding = "UTF-8")
     })
   )
 

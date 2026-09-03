@@ -406,7 +406,8 @@ s2_raster_local <- function(aoi, year = 2023, src = NULL, base_url = NULL,
 #' @keywords internal
 #' @noRd
 .s2_class_areas <- function(aoi, year = 2023, src = NULL, base_url = NULL,
-                            cache = TRUE, cache_dir = NULL) {
+                            cache = TRUE, cache_dir = NULL,
+                            max_pixels = .area_max_pixels()) {
   if (!requireNamespace("terra", quietly = TRUE) ||
       !requireNamespace("sf", quietly = TRUE)) {
     stop("Packages 'terra' and 'sf' are required.", call. = FALSE)
@@ -419,17 +420,47 @@ s2_raster_local <- function(aoi, year = 2023, src = NULL, base_url = NULL,
   on.exit(for (k in names(old)) terra::setGDALconfig(k, old[[k]]), add = TRUE)
 
   tiles <- .s2_tiles_for_aoi(aoi_ll)
-  tabs <- lapply(tiles, function(t) {
-    r <- .s2_read_tile(t, aoi_ll, year, src, base_url, cache, cache_dir)
-    if (is.null(r)) return(NULL)
-    mb_class_areas_raster(r)
-  })
-  tabs <- tabs[!vapply(tabs, is.null, logical(1))]
-  if (!length(tabs)) return(data.frame(code = integer(0), area_km2 = numeric(0)))
-  all <- do.call(rbind, tabs)
-  agg <- stats::aggregate(area_km2 ~ code, data = all, FUN = sum)
-  agg$code <- as.integer(agg$code)
-  agg[is.finite(agg$area_km2) & agg$area_km2 > 0, , drop = FALSE]
+  tabs <- lapply(tiles, .s2_tile_class_areas, aoi_ll = aoi_ll, year = year,
+                 src = src, base_url = base_url, max_pixels = max_pixels)
+  .sum_class_areas(tabs)
+}
+
+#' Per-class Esri areas for one MGRS tile, bounded by a pixel budget.
+#'
+#' Reads the AOI-clipped part of the tile in its native UTM projection. As for
+#' MapBiomas, sparse geometry (e.g. AOO cells) is read one part at a time at
+#' native 10 m resolution, while a single large part (e.g. an EOO hull spanning
+#' the tile) is decimated with majority resampling so the read stays bounded.
+#' @keywords internal
+#' @noRd
+.s2_tile_class_areas <- function(tile, aoi_ll, year, src, base_url, max_pixels) {
+  clip <- .s2_clip_to_cell(aoi_ll, tile$cell)
+  if (is.null(clip)) return(NULL)
+
+  urls <- .s2_tile_urls(tile, year, src, base_url)
+  r <- NULL; used <- NA_character_
+  for (u in urls) {
+    path <- if (grepl("^https?://", u)) paste0("/vsicurl/", u) else u
+    r <- tryCatch(terra::rast(path), error = function(e) NULL)
+    if (!is.null(r)) { used <- path; break }
+  }
+  if (is.null(r)) return(NULL)
+
+  clip_r <- sf::st_transform(clip, terra::crs(r))
+  parts <- .geom_parts(clip_r)
+  part_px <- vapply(parts, function(p)
+    .bbox_native_px(r, as.vector(terra::ext(terra::vect(p))))[["n"]], numeric(1))
+
+  if (sum(part_px) <= max_pixels) {
+    tabs <- lapply(parts, function(p) {
+      v  <- terra::vect(p)
+      rc <- terra::mask(terra::crop(r, terra::ext(v), snap = "out"), v)
+      mb_class_areas_raster(rc)
+    })
+  } else {
+    tabs <- lapply(parts, function(p) .mb_area_read_part(used, p, r, max_pixels))
+  }
+  .sum_class_areas(tabs)
 }
 
 #' Downsampled Sentinel-2/Esri raster for display (not area calc)

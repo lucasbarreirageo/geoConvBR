@@ -70,7 +70,19 @@ laea_crs <- function(geom) {
 #' @keywords internal
 #' @noRd
 .st_union_quiet <- function(x) {
-  suppressWarnings(suppressMessages(sf::st_union(x)))
+  out <- tryCatch(
+    suppressWarnings(suppressMessages(sf::st_union(x))),
+    error = function(e) NULL)
+  if (!is.null(out)) return(out)
+  # The S2 engine can reject a degenerate edge (duplicate vertex) when unioning
+  # large or densely-vertexed geographic geometries. Retry off-S2 (planar GEOS),
+  # making the inputs valid first, so a wide-ranging species does not abort the
+  # whole assessment.
+  old <- suppressMessages(sf::sf_use_s2())
+  on.exit(suppressMessages(sf::sf_use_s2(old)), add = TRUE)
+  suppressMessages(sf::sf_use_s2(FALSE))
+  x2 <- tryCatch(sf::st_make_valid(x), error = function(e) x)
+  suppressWarnings(suppressMessages(sf::st_union(x2)))
 }
 
 #' Geometry a raster is clipped to for a given `clip` choice.
@@ -202,6 +214,98 @@ iucn_category_B <- function(eoo_km2 = NA_real_, aoo_km2 = NA_real_) {
     c(cat_eoo, cat_aoo)[best]
   }
   list(eoo_category = cat_eoo, aoo_category = cat_aoo, combined = combined)
+}
+
+#' Apply IUCN Red List Criterion B (size thresholds plus sub-criteria)
+#'
+#' Combines the EOO (B1) and AOO (B2) \emph{size} thresholds of Criterion B with
+#' the sub-criteria required for a threatened listing, following the IUCN Red
+#' List Categories and Criteria (v3.1) and the Guidelines for Using them
+#' (Section 6, Criterion B; Section 10, DD/NT/NE). Unlike
+#' \code{\link{iucn_category_B}} (size flags only), this returns a category that
+#' can actually be applied.
+#'
+#' A taxon qualifies for a threatened category (CR, EN, VU) only if it meets the
+#' size threshold \emph{and} at least two of these three sub-criteria:
+#' \itemize{
+#'   \item \strong{(a)} severely fragmented \emph{or} number of locations
+#'     \eqn{\le} 1 (CR), 5 (EN) or 10 (VU);
+#'   \item \strong{(b)} continuing decline (in EOO, AOO, area/extent/quality of
+#'     habitat, number of locations/subpopulations, or mature individuals);
+#'   \item \strong{(c)} extreme fluctuations.
+#' }
+#' Sub-criterion (a) is derived here from \code{n_locations} (and
+#' \code{severe_fragmentation} when supplied). Sub-criteria (b) and (c) cannot be
+#' inferred from occurrence points, so they are \strong{expert inputs}; left as
+#' \code{NA} they are treated as \emph{not documented} (not met).
+#'
+#' Following Section 10: a taxon that meets a size threshold but not two
+#' sub-criteria is returned as \strong{NT} (Near Threatened, it "nearly meets"
+#' the requirements); one clearly far from every threshold as \strong{LC}.
+#' \strong{DD} and \strong{NE} are \emph{never} assigned automatically - they
+#' require the assessor's judgement about data adequacy and are left to the user.
+#'
+#' @param eoo_km2,aoo_km2 EOO and AOO in km^2 (\code{NA} if undefined).
+#' @param n_locations Estimated number of locations (\code{NA} if unknown).
+#' @param severe_fragmentation Logical; \code{TRUE} if the taxon is severely
+#'   fragmented. \code{NA} (default) = not assessed.
+#' @param decline Logical; \code{TRUE} if there is a continuing decline
+#'   (sub-criterion b). \code{NA} (default) = not documented.
+#' @param extreme_fluctuation Logical; \code{TRUE} if there are extreme
+#'   fluctuations (sub-criterion c). \code{NA} (default) = not documented.
+#' @return A list with \code{category} (one of \code{"CR"}, \code{"EN"},
+#'   \code{"VU"}, \code{"NT"}, \code{"LC"}, or \code{NA} when neither EOO nor AOO
+#'   is available), \code{code} (e.g. \code{"VU B1ab"}), \code{qualifies_size}
+#'   (the highest size level met, or \code{NA}) and the evaluated sub-criteria
+#'   \code{a}, \code{b}, \code{c}.
+#' @examples
+#' # EN size, few locations and a documented decline -> EN B1ab
+#' iucn_criterion_B(eoo_km2 = 3000, aoo_km2 = 400, n_locations = 4,
+#'                  decline = TRUE)$code
+#' # Same size but decline not documented -> only one sub-criterion -> NT
+#' iucn_criterion_B(eoo_km2 = 3000, aoo_km2 = 400, n_locations = 4)$category
+#' @seealso \code{\link{iucn_category_B}}
+#' @export
+iucn_criterion_B <- function(eoo_km2 = NA_real_, aoo_km2 = NA_real_,
+                             n_locations = NA_real_,
+                             severe_fragmentation = NA,
+                             decline = NA, extreme_fluctuation = NA) {
+  levels <- list(
+    CR = list(eoo = 100,   aoo = 10,   loc = 1),
+    EN = list(eoo = 5000,  aoo = 500,  loc = 5),
+    VU = list(eoo = 20000, aoo = 2000, loc = 10))
+  b    <- isTRUE(decline)
+  cc   <- isTRUE(extreme_fluctuation)
+  frag <- isTRUE(severe_fragmentation)
+  nloc <- suppressWarnings(as.numeric(n_locations))
+  eoo  <- suppressWarnings(as.numeric(eoo_km2))
+  aoo  <- suppressWarnings(as.numeric(aoo_km2))
+
+  for (lv in names(levels)) {
+    th <- levels[[lv]]
+    size_b1 <- is.finite(eoo) && eoo < th$eoo
+    size_b2 <- is.finite(aoo) && aoo < th$aoo
+    if (!size_b1 && !size_b2) next
+    a <- frag || (is.finite(nloc) && nloc <= th$loc)
+    if (sum(a, b, cc) >= 2) {
+      axes <- paste0(c(if (size_b1) "1", if (size_b2) "2"), collapse = "+")
+      lett <- paste0(c(if (a) "a", if (b) "b", if (cc) "c"), collapse = "")
+      return(list(category = lv, code = paste0(lv, " B", axes, lett),
+                  qualifies_size = lv, a = a, b = b, c = cc))
+    }
+  }
+
+  a_vu <- frag || (is.finite(nloc) && nloc <= levels$VU$loc)
+  size_any <- (is.finite(eoo) && eoo < levels$VU$eoo) ||
+              (is.finite(aoo) && aoo < levels$VU$aoo)
+  if (size_any)
+    return(list(category = "NT", code = "NT (meets B size only)",
+                qualifies_size = "VU", a = a_vu, b = b, c = cc))
+  if (!is.finite(eoo) && !is.finite(aoo))
+    return(list(category = NA_character_, code = NA_character_,
+                qualifies_size = NA_character_, a = a_vu, b = b, c = cc))
+  list(category = "LC", code = "LC", qualifies_size = NA_character_,
+       a = a_vu, b = b, c = cc)
 }
 
 #' Conservation-group labels and colours (single source of truth)
