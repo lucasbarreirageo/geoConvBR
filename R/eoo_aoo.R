@@ -77,7 +77,7 @@ calc_eoo <- function(points, segmentize_km = 20) {
     return(out)
   }
 
-  out$area_km2 <- as.numeric(sf::st_area(hull)) / 1e6  # m^2 -> km^2
+  out$area_km2 <- .spheroid_area_km2(hull)  # m^2 -> km^2, S2-robust
   out$hull <- hull
   out
 }
@@ -87,12 +87,70 @@ calc_eoo <- function(points, segmentize_km = 20) {
 .convex_hull_spheroid <- function(co, segmentize_km) {
   idx <- grDevices::chull(co[, 1], co[, 2])
   idx <- c(idx, idx[1])
-  ring <- co[idx, , drop = FALSE]
+  ring <- .close_ring(.dedupe_vertices(co[idx, , drop = FALSE]))
 
   poly <- sf::st_sfc(sf::st_polygon(list(ring)), crs = 4326)
   # Densify edges along great circles, then measure on the ellipsoid (ConR).
   poly <- sf::st_segmentize(poly, units::set_units(segmentize_km, "km"))
-  sf::st_make_valid(poly)
+  # Segmentizing very long geodesic edges can emit consecutive coincident
+  # vertices, which the S2 engine later rejects ("Edge is degenerate (duplicate
+  # vertex)"). Drop them before validating so a large, widely-spread range still
+  # yields a usable hull.
+  poly <- .dedupe_polygon_rings(poly)
+  tryCatch(sf::st_make_valid(poly), error = function(e) poly)
+}
+
+#' Remove consecutive (near-)duplicate vertices from a coordinate matrix.
+#' Tolerance is ~1e-7 degrees (~1 cm), matching the S2 snap scale that
+#' otherwise flags a zero-length edge as a degenerate duplicate.
+#' @keywords internal
+#' @noRd
+.dedupe_vertices <- function(m, tol = 1e-7) {
+  if (is.null(m) || nrow(m) < 2L) return(m)
+  d <- abs(diff(m[, 1:2, drop = FALSE]))
+  keep <- c(TRUE, (d[, 1] > tol) | (d[, 2] > tol))
+  m[keep, , drop = FALSE]
+}
+
+#' Ensure a coordinate ring is explicitly closed (first vertex repeated last).
+#' @keywords internal
+#' @noRd
+.close_ring <- function(m) {
+  if (!is.null(m) && nrow(m) >= 1L &&
+      any(m[1, ] != m[nrow(m), ]))
+    m <- rbind(m, m[1, , drop = FALSE])
+  m
+}
+
+#' De-duplicate the vertices of every ring of a single-POLYGON sfc, dropping any
+#' ring left with too few points to be valid.
+#' @keywords internal
+#' @noRd
+.dedupe_polygon_rings <- function(poly) {
+  crs <- sf::st_crs(poly)
+  g <- tryCatch(sf::st_geometry(poly)[[1]], error = function(e) NULL)
+  if (is.null(g) || !length(g)) return(poly)
+  rings <- lapply(g, function(r) .close_ring(.dedupe_vertices(r)))
+  rings <- Filter(function(r) !is.null(r) && nrow(r) >= 4L, rings)
+  if (!length(rings)) return(poly)
+  tryCatch(sf::st_sfc(sf::st_polygon(rings), crs = crs),
+           error = function(e) poly)
+}
+
+#' Ellipsoidal area (km^2) of a geographic geometry, robust to the S2 engine
+#' rejecting a degenerate edge on very large hulls. On such a failure it retries
+#' with S2 disabled, where \code{st_area()} on a longlat geometry falls back to
+#' \pkg{lwgeom}'s geodesic (ellipsoidal) area - the same ConR-style measurement.
+#' @keywords internal
+#' @noRd
+.spheroid_area_km2 <- function(g) {
+  a <- tryCatch(sum(as.numeric(sf::st_area(g))) / 1e6, error = function(e) NA_real_)
+  if (length(a) == 1L && is.finite(a)) return(a)
+  old <- suppressMessages(sf::sf_use_s2())
+  on.exit(suppressMessages(sf::sf_use_s2(old)), add = TRUE)
+  suppressMessages(sf::sf_use_s2(FALSE))
+  g2 <- tryCatch(sf::st_make_valid(g), error = function(e) g)
+  tryCatch(sum(as.numeric(sf::st_area(g2))) / 1e6, error = function(e) NA_real_)
 }
 
 #' @keywords internal

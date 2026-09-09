@@ -25,6 +25,10 @@
 #' @param include_not_observed Logical; keep the "Not Observed" class
 #'   (default \code{FALSE}).
 #' @param verbose Logical; print progress (default \code{TRUE}).
+#' @param max_pixels Pixel budget for each year's local area read (default
+#'   \code{5e7}). Large or widely-spread ranges are read per polygon part and/or
+#'   decimated with majority resampling so the read stays bounded; class
+#'   proportions are preserved. Ignored by the GEE backend.
 #' @return A \code{data.frame} (long) with columns \code{year}, \code{label},
 #'   \code{hex}, \code{group}, \code{area_km2} and \code{pct} (percentage of the
 #'   mapped area in that year). For \code{by = "class"} it also has \code{code}
@@ -35,9 +39,17 @@ cover_timeseries <- function(geom, years = NULL, collection = NULL,
                              initiative = "brazil",
                              backend = c("local", "gee"), src = NULL,
                              by = c("class", "group"),
-                             include_not_observed = FALSE, verbose = TRUE) {
+                             include_not_observed = FALSE, verbose = TRUE,
+                             max_pixels = 5e7) {
   backend <- match.arg(backend)
   by <- match.arg(by)
+  # Planar (GEOS) geometry, as in assess_species(): avoids the S2 "degenerate
+  # edge" rejection of a wide-ranging densified hull during the windowed reads.
+  if (requireNamespace("sf", quietly = TRUE)) {
+    .old_s2 <- suppressMessages(sf::sf_use_s2())
+    on.exit(suppressMessages(sf::sf_use_s2(.old_s2)), add = TRUE)
+    suppressMessages(sf::sf_use_s2(FALSE))
+  }
   ini <- .mb_resolve_initiative(initiative)
   initiative <- ini$key
   if (is.null(collection)) collection <- ini$collection
@@ -57,15 +69,18 @@ cover_timeseries <- function(geom, years = NULL, collection = NULL,
   out <- vector("list", length(years))
   for (i in seq_along(years)) {
     y <- years[i]
+    # Release the previous year's raster memory before the next read so the peak
+    # footprint stays at one year, not the whole series (avoids the OS killing
+    # the R process - "Terminated" - on memory-limited machines).
+    if (i > 1L) invisible(gc(FALSE))
     if (verbose) message(sprintf("  coverage %d (%d/%d)...", y, i, length(years)))
     ca <- tryCatch({
       if (backend == "gee") {
         mb_class_areas_gee(g, year = y, collection = collection)
       } else {
-        mb_class_areas_raster(
-          mb_raster_local(g, year = y, collection = collection,
-                          initiative = initiative, src = src)
-        )
+        .mb_class_areas_local(g, year = y, collection = collection,
+                              initiative = initiative, src = src,
+                              max_pixels = max_pixels)
       }
     }, error = function(e) {
       warning(sprintf("year %d failed: %s", y, conditionMessage(e)), call. = FALSE)
@@ -83,6 +98,7 @@ cover_timeseries <- function(geom, years = NULL, collection = NULL,
     m$year <- y
     out[[i]] <- m
   }
+  invisible(gc(FALSE))
 
   df <- do.call(rbind, out)
   if (is.null(df) || !nrow(df))
@@ -149,13 +165,19 @@ cover_timeseries <- function(geom, years = NULL, collection = NULL,
 #' @param species Species name (default: first assessed species).
 #' @param range \code{"eoo"} (default) or \code{"aoo"}.
 #' @param years,by,src,verbose Passed to \code{\link{cover_timeseries}}.
+#' @param max_pixels Pixel budget per year, passed to
+#'   \code{\link{cover_timeseries}}. Defaults to \code{8e6} (~8 million) - much
+#'   lower than the single-snapshot assessment, because a composition
+#'   \emph{trend} is a ratio and needs far less resolution, and every year is a
+#'   separate read: the coarser budget makes a multi-year series over a large
+#'   range several times faster with no meaningful change to the percentages.
 #' @return The long data frame from \code{\link{cover_timeseries}}, with
 #'   attributes \code{species} and \code{range} set.
 #' @export
 timeseries_for_species <- function(assessment, species = NULL,
                                    range = c("eoo", "aoo"), years = NULL,
                                    by = c("class", "group"), src = NULL,
-                                   verbose = TRUE) {
+                                   verbose = TRUE, max_pixels = 8e6) {
   stopifnot(inherits(assessment, "geoconv_assessment"))
   range <- match.arg(range)
   by <- match.arg(by)
@@ -176,7 +198,7 @@ timeseries_for_species <- function(assessment, species = NULL,
   ts <- cover_timeseries(geom, years = years, collection = lc_coll,
                          initiative = lc_ini,
                          backend = s$backend, src = src, by = by,
-                         verbose = verbose)
+                         verbose = verbose, max_pixels = max_pixels)
   attr(ts, "species") <- species
   attr(ts, "range") <- toupper(range)
   ts

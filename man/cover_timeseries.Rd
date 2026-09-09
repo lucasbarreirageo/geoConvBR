@@ -13,7 +13,8 @@ cover_timeseries(
   src = NULL,
   by = c("class", "group"),
   include_not_observed = FALSE,
-  verbose = TRUE
+  verbose = TRUE,
+  max_pixels = 5e+07
 )
 }
 \arguments{
@@ -41,6 +42,11 @@ official colours) or \code{"group"} (natural / anthropic / water / other).}
 (default \code{FALSE}).}
 
 \item{verbose}{Logical; print progress (default \code{TRUE}).}
+
+\item{max_pixels}{Pixel budget for each year's local area read (default
+\code{5e7}). Large or widely-spread ranges are read per polygon part and/or
+decimated with majority resampling so the read stays bounded; class
+proportions are preserved. Ignored by the GEE backend.}
 }
 \value{
 A \code{data.frame} (long) with columns \code{year}, \code{label},

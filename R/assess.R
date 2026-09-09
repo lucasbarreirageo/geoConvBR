@@ -66,6 +66,26 @@
 #' @param src Optional MapBiomas LULC GeoTIFF for the local backend.
 #' @param fire_src Optional MapBiomas Fire GeoTIFF (overrides the public URL).
 #' @param water_in_denominator Passed to \code{\link{summarise_conversion}}.
+#' @param area_max_pixels Pixel budget for the land-cover \emph{area} read on the
+#'   local backend (default \code{5e7}, ~50 million). Ranges whose native window
+#'   fits the budget are read at full resolution (30 m MapBiomas, 10 m
+#'   Sentinel-2); larger or widely-spread ranges are read per polygon part
+#'   and/or decimated with majority resampling so a continental EOO no longer
+#'   streams billions of pixels. Class proportions - and thus the % converted /
+#'   natural - are preserved. Raise it for finer reads of huge ranges, lower it
+#'   for speed. Ignored by the GEE backend (reduction is server-side).
+#' @param decline,extreme_fluctuation,severe_fragmentation Expert inputs for the
+#'   Criterion B sub-criteria, applied by \code{\link{iucn_criterion_B}} on top
+#'   of the size thresholds to yield an applicable category (\code{category_B}
+#'   and \code{criterion_B_code} in the summary). \code{decline} is
+#'   sub-criterion (b) (a continuing decline), \code{extreme_fluctuation} is (c),
+#'   and \code{severe_fragmentation} feeds (a) alongside the estimated number of
+#'   locations. Each may be a single value applied to every species, or a named
+#'   logical vector keyed by species name. \code{NA} (default) means \emph{not
+#'   documented} (treated as not met), so by default a range that only meets a
+#'   size threshold is reported as \strong{NT} until a decline or fragmentation
+#'   is supplied. Sub-criteria (b)/(c) cannot be inferred from occurrence points,
+#'   hence they are inputs, not computed. DD/NE are never assigned automatically.
 #' @param min_records Minimum records required to attempt an assessment.
 #' @param verbose Logical; print progress (default \code{TRUE}).
 #' @return An object of class \code{geoconv_assessment}: a list with
@@ -100,8 +120,22 @@ assess_species <- function(occ, initiative = "brazil",
                            protected = FALSE, pa_src = NULL,
                            src = NULL, fire_src = NULL,
                            water_in_denominator = FALSE,
+                           area_max_pixels = 5e7,
+                           decline = NA, extreme_fluctuation = NA,
+                           severe_fragmentation = NA,
                            min_records = 1, verbose = TRUE) {
   .assert_points(occ, "occ")
+  # Run the whole assessment with planar (GEOS) geometry. The S2 spherical
+  # engine rejects the densified, wide-ranging EOO hull with
+  # "Loop ... Edge is degenerate (duplicate vertex)" during the land-cover and
+  # protected-area overlays; GEOS is tolerant, EOO area stays ellipsoidal via
+  # lwgeom (see calc_eoo), and this matches the planar approach ConR uses.
+  # Restored on exit.
+  if (requireNamespace("sf", quietly = TRUE)) {
+    .old_s2 <- suppressMessages(sf::sf_use_s2())
+    on.exit(suppressMessages(sf::sf_use_s2(.old_s2)), add = TRUE)
+    suppressMessages(sf::sf_use_s2(FALSE))
+  }
   backend <- match.arg(backend)
   fallback <- match.arg(fallback)
   loc_method <- match.arg(loc_method)
@@ -196,9 +230,11 @@ assess_species <- function(occ, initiative = "brazil",
     eoo_conv <- aoo_conv <- NULL
     if (mapbiomas) {
       eoo_conv <- .conversion_for(eoo$hull, eff_year, eff_coll, eff_ini, backend,
-                                  src, water_in_denominator, verbose, "EOO")
+                                  src, water_in_denominator, verbose, "EOO",
+                                  max_pixels = area_max_pixels)
       aoo_conv <- .conversion_for(aoo_geom, eff_year, eff_coll, eff_ini, backend,
-                                  src, water_in_denominator, verbose, "AOO")
+                                  src, water_in_denominator, verbose, "AOO",
+                                  max_pixels = area_max_pixels)
 
       # No MapBiomas data over this range -> fall back to global Sentinel-2/Esri.
       if (do_fallback && !identical(eff_prov, "esri") &&
@@ -209,10 +245,10 @@ assess_species <- function(occ, initiative = "brazil",
         eff_coll <- NA_integer_; eff_year <- .s2_clamp_year(year)
         eoo_conv <- .conversion_for(eoo$hull, eff_year, eff_coll, eff_ini,
                                     "local", NULL, water_in_denominator,
-                                    verbose, "EOO")
+                                    verbose, "EOO", max_pixels = area_max_pixels)
         aoo_conv <- .conversion_for(aoo_geom, eff_year, eff_coll, eff_ini,
                                     "local", NULL, water_in_denominator,
-                                    verbose, "AOO")
+                                    verbose, "AOO", max_pixels = area_max_pixels)
       }
     }
 
@@ -254,6 +290,16 @@ assess_species <- function(occ, initiative = "brazil",
       pa$aoo_nat_uc_pct_in <- a_nat$nat_pct_uc
     }
     
+    # Apply Criterion B (size thresholds + sub-criteria) with the (final)
+    # number of locations - which the protected-area branch above may have
+    # recomputed - and the expert sub-criteria inputs (b/c/fragmentation).
+    critB <- iucn_criterion_B(
+      eoo_km2 = eoo$area_km2, aoo_km2 = aoo$area_km2,
+      n_locations = loc$n_locations,
+      severe_fragmentation = .pick_subcrit(severe_fragmentation, sp),
+      decline = .pick_subcrit(decline, sp),
+      extreme_fluctuation = .pick_subcrit(extreme_fluctuation, sp))
+
     row <- data.frame(
       species = sp,
       n_records = eoo$n_records,
@@ -270,6 +316,11 @@ assess_species <- function(occ, initiative = "brazil",
       eoo_cat_B1 = cats$eoo_category,
       aoo_cat_B2 = cats$aoo_category,
       provisional_cat = cats$combined,
+      category_B = critB$category,
+      criterion_B_code = critB$code,
+      subcrit_a = critB$a,
+      subcrit_b = critB$b,
+      subcrit_c = critB$c,
       mapbiomas_initiative = eff_ini,
       mapbiomas_year = eff_year,
       mapbiomas_collection = eff_coll,
@@ -325,6 +376,18 @@ assess_species <- function(occ, initiative = "brazil",
 #' @noRd
 .pp <- function(x) if (is.null(x) || length(x) == 0) NA_real_ else round(x, 1)
 
+#' Resolve a per-species sub-criterion input: a value named by species takes
+#' that element, a single unnamed value applies to all, anything else is NA.
+#' @keywords internal
+#' @noRd
+.pick_subcrit <- function(x, sp) {
+  if (is.null(x) || length(x) == 0) return(NA)
+  nm <- names(x)
+  if (!is.null(nm) && sp %in% nm) return(x[[sp]])
+  if (length(x) == 1L && is.null(nm)) return(x[[1]])
+  NA
+}
+
 #' Terrestrial area (natural + anthropic) of a conversion result; 0 if empty.
 #' Used to detect a range that falls outside the MapBiomas product's coverage.
 #' @keywords internal
@@ -348,7 +411,8 @@ assess_species <- function(occ, initiative = "brazil",
 #' @keywords internal
 #' @noRd
 .conversion_for <- function(geom, year, collection, initiative, backend, src,
-                            water_in_denominator, verbose, label) {
+                            water_in_denominator, verbose, label,
+                            max_pixels = .area_max_pixels()) {
   if (is.null(geom) || length(geom) == 0 || all(sf::st_is_empty(geom))) {
     if (verbose) message(sprintf("  %s: no polygon (need >= 3 points); ",
                                  label), "conversion = NA.")
@@ -358,13 +422,13 @@ assess_species <- function(occ, initiative = "brazil",
                    error = function(e) "mapbiomas")
   out <- tryCatch({
     if (identical(prov, "esri")) {
-      ca <- .s2_class_areas(geom, year = year, src = src)
+      ca <- .s2_class_areas(geom, year = year, src = src, max_pixels = max_pixels)
     } else if (backend == "gee") {
       ca <- mb_class_areas_gee(geom, year = year, collection = collection)
     } else {
-      r <- mb_raster_local(geom, year = year, collection = collection,
-                           initiative = initiative, src = src)
-      ca <- mb_class_areas_raster(r)
+      ca <- .mb_class_areas_local(geom, year = year, collection = collection,
+                                  initiative = initiative, src = src,
+                                  max_pixels = max_pixels)
     }
     summarise_conversion(ca, collection = collection, initiative = initiative,
                          water_in_denominator = water_in_denominator)

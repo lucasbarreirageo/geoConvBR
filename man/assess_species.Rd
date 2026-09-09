@@ -26,6 +26,10 @@ assess_species(
   src = NULL,
   fire_src = NULL,
   water_in_denominator = FALSE,
+  area_max_pixels = 5e+07,
+  decline = NA,
+  extreme_fluctuation = NA,
+  severe_fragmentation = NA,
   min_records = 1,
   verbose = TRUE
 )
@@ -109,6 +113,28 @@ the EOO/AOO within them. Default \code{FALSE}. Requires internet unless
 \item{fire_src}{Optional MapBiomas Fire GeoTIFF (overrides the public URL).}
 
 \item{water_in_denominator}{Passed to \code{\link{summarise_conversion}}.}
+
+\item{area_max_pixels}{Pixel budget for the land-cover \emph{area} read on the
+local backend (default \code{5e7}, ~50 million). Ranges whose native window
+fits the budget are read at full resolution (30 m MapBiomas, 10 m
+Sentinel-2); larger or widely-spread ranges are read per polygon part
+and/or decimated with majority resampling so a continental EOO no longer
+streams billions of pixels. Class proportions - and thus the \% converted /
+natural - are preserved. Raise it for finer reads of huge ranges, lower it
+for speed. Ignored by the GEE backend (reduction is server-side).}
+
+\item{decline, extreme_fluctuation, severe_fragmentation}{Expert inputs for the
+Criterion B sub-criteria, applied by \code{\link{iucn_criterion_B}} on top
+of the size thresholds to yield an applicable category (\code{category_B}
+and \code{criterion_B_code} in the summary). \code{decline} is
+sub-criterion (b) (a continuing decline), \code{extreme_fluctuation} is (c),
+and \code{severe_fragmentation} feeds (a) alongside the estimated number of
+locations. Each may be a single value applied to every species, or a named
+logical vector keyed by species name. \code{NA} (default) means \emph{not
+documented} (treated as not met), so by default a range that only meets a
+size threshold is reported as \strong{NT} until a decline or fragmentation
+is supplied. Sub-criteria (b)/(c) cannot be inferred from occurrence points,
+hence they are inputs, not computed. DD/NE are never assigned automatically.}
 
 \item{min_records}{Minimum records required to attempt an assessment.}
 
