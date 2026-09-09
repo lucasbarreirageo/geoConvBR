@@ -46,11 +46,11 @@ can actually be applied.
 A taxon qualifies for a threatened category (CR, EN, VU) only if it meets the
 size threshold \emph{and} at least two of these three sub-criteria:
 \itemize{
-  \item \strong{(a)} severely fragmented \emph{or} number of locations
-    \eqn{\le} 1 (CR), 5 (EN) or 10 (VU);
-  \item \strong{(b)} continuing decline (in EOO, AOO, area/extent/quality of
-    habitat, number of locations/subpopulations, or mature individuals);
-  \item \strong{(c)} extreme fluctuations.
+\item \strong{(a)} severely fragmented \emph{or} number of locations
+\eqn{\le} 1 (CR), 5 (EN) or 10 (VU);
+\item \strong{(b)} continuing decline (in EOO, AOO, area/extent/quality of
+habitat, number of locations/subpopulations, or mature individuals);
+\item \strong{(c)} extreme fluctuations.
 }
 Sub-criterion (a) is derived here from \code{n_locations} (and
 \code{severe_fragmentation} when supplied). Sub-criteria (b) and (c) cannot be

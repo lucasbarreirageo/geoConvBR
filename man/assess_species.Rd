@@ -119,7 +119,7 @@ local backend (default \code{5e7}, ~50 million). Ranges whose native window
 fits the budget are read at full resolution (30 m MapBiomas, 10 m
 Sentinel-2); larger or widely-spread ranges are read per polygon part
 and/or decimated with majority resampling so a continental EOO no longer
-streams billions of pixels. Class proportions - and thus the % converted /
+streams billions of pixels. Class proportions - and thus the \% converted /
 natural - are preserved. Raise it for finer reads of huge ranges, lower it
 for speed. Ignored by the GEE backend (reduction is server-side).}
 

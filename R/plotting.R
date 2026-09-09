@@ -186,7 +186,7 @@ map_species <- function(assessment, species = NULL, mapbiomas = TRUE,
   m <- leaflet::addControl(
     m,
     html = sprintf(
-      "<div style='max-width:280px;white-space:normal;background:rgba(255,255,255,.9);padding:2px 8px;border-radius:6px;font-size:14px'><b>%s</b></div>",
+      "<div style='display:inline-block;width:max-content;max-width:280px;white-space:normal;word-break:keep-all;overflow-wrap:normal;background:rgba(255,255,255,.9);padding:2px 8px;border-radius:6px;font-size:14px;line-height:1.25'><b>%s</b></div>",
       .sp_html(species)),
     position = "topleft")
   m
