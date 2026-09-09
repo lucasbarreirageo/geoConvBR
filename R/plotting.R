@@ -180,13 +180,15 @@ map_species <- function(assessment, species = NULL, mapbiomas = TRUE,
   m <- leaflet::addLayersControl(
     m, baseGroups = c("Light", "Satellite"), overlayGroups = overlay,
     options = leaflet::layersControlOptions(collapsed = FALSE))
-  # Species name box: placed top-left (below the zoom control) and allowed to
-  # wrap, so a long italic name is never clipped by the right edge of the map as
-  # it was when anchored top-right with white-space:nowrap.
+  # Species name box: placed top-left (below the zoom control). The white
+  # background sits on an inline <span>, which is sized by its text content, so
+  # the box hugs the word exactly instead of stretching to the control's width;
+  # box-decoration-break:clone keeps the background tight around each line when a
+  # long name wraps (capped by the wrapper's max-width).
   m <- leaflet::addControl(
     m,
     html = sprintf(
-      "<div style='display:inline-block;width:max-content;max-width:280px;white-space:normal;word-break:keep-all;overflow-wrap:normal;background:rgba(255,255,255,.9);padding:2px 8px;border-radius:6px;font-size:14px;line-height:1.25'><b>%s</b></div>",
+      "<div style='max-width:280px;line-height:1.35'><span style='background:rgba(255,255,255,.9);padding:2px 8px;border-radius:6px;font-size:14px;-webkit-box-decoration-break:clone;box-decoration-break:clone'><b>%s</b></span></div>",
       .sp_html(species)),
     position = "topleft")
   m
